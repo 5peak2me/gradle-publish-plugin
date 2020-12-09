@@ -1,0 +1,217 @@
+/*
+ * Copyright 2013 Chris Banes
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+
+apply plugin: 'maven'
+apply plugin: 'signing'
+
+def isReleaseBuild() {
+    return !VERSION_NAME.contains("SNAPSHOT")
+}
+
+def getReleaseRepositoryUrl() {
+    return hasProperty('RELEASE_REPOSITORY_URL') ? RELEASE_REPOSITORY_URL
+            : "https://oss.sonatype.org/service/local/staging/deploy/maven2/"
+}
+
+def getSnapshotRepositoryUrl() {
+    return hasProperty('SNAPSHOT_REPOSITORY_URL') ? SNAPSHOT_REPOSITORY_URL
+            : "https://oss.sonatype.org/content/repositories/snapshots/"
+}
+
+def getRepositoryUsername() {
+    return hasProperty('NEXUS_USERNAME') ? NEXUS_USERNAME : ""
+}
+
+def getRepositoryPassword() {
+    return hasProperty('NEXUS_PASSWORD') ? NEXUS_PASSWORD : ""
+}
+
+def configurePom(pom) {
+    pom.project {
+        name POM_NAME
+        packaging POM_PACKAGING
+        description POM_DESCRIPTION
+        url POM_URL
+
+        scm {
+            url POM_SCM_URL
+            connection POM_SCM_CONNECTION
+            developerConnection POM_SCM_DEV_CONNECTION
+        }
+
+        licenses {
+            license {
+                name POM_LICENCE_NAME
+                url POM_LICENCE_URL
+                distribution POM_LICENCE_DIST
+            }
+        }
+
+        developers {
+            developer {
+                id POM_DEVELOPER_ID
+                name POM_DEVELOPER_NAME
+                email POM_DEVELOPER_EMAIL
+            }
+        }
+    }
+}
+
+afterEvaluate { project ->
+    uploadArchives {
+        repositories {
+            mavenDeployer {
+                // 为Pom文件做数字签名
+                beforeDeployment { MavenDeployment deployment -> signing.signPom(deployment) }
+
+                pom.groupId = GROUP
+                pom.artifactId = POM_ARTIFACT_ID
+                pom.version = VERSION_NAME
+
+                // 指定项目部署到的中央库地址
+                repository(url: getReleaseRepositoryUrl()) {
+                    authentication(userName: getRepositoryUsername(), password: getRepositoryPassword())
+                }
+                snapshotRepository(url: getSnapshotRepositoryUrl()) {
+                    authentication(userName: getRepositoryUsername(), password: getRepositoryPassword())
+                }
+
+                pom.whenConfigured { pom ->
+                    pom.packaging = POM_PACKAGING
+                }
+                // 构造项目的Pom文件，不要遗漏必填项
+                configurePom(pom)
+            }
+        }
+    }
+
+    signing {
+        required { isReleaseBuild() && gradle.taskGraph.hasTask("uploadArchives") }
+        sign configurations.archives
+    }
+
+//    gradle.taskGraph.whenReady { taskGraph ->
+//        if (taskGraph.allTasks.any { it instanceof Sign }) {
+//            // Use Java 6's console to read from the console (no good for
+//            // a CI environment)
+//            Console console = System.console()
+//            console.printf "\n\nWe have to sign some things in this build." +
+//                    "\n\nPlease enter your signing details.\n\n"
+//
+//            def id = console.readLine("PGP Key Id: ")
+//            def file = console.readLine("PGP Secret Key Ring File (absolute path): ")
+//            def password = console.readPassword("PGP Private Key Password: ")
+//
+//            allprojects { ext."signing.keyId" = id }
+//            allprojects { ext."signing.secretKeyRingFile" = file }
+//            allprojects { ext."signing.password" = password }
+//
+//            console.printf "\nThanks.\n\n"
+//        }
+//    }
+
+    def isAndroidProject = project.plugins.hasPlugin('com.android.application') || project.plugins.hasPlugin('com.android.library')
+
+    if (isAndroidProject) {
+        task install(type: Upload, dependsOn: assemble) {
+            repositories.mavenInstaller {
+                configuration = configurations.archives
+                configurePom(pom)
+            }
+        }
+
+        task androidJavadocs(type: Javadoc) {
+//            source = android.sourceSets.main.java.source
+            source = android.sourceSets.main.java.srcDirs
+            // javadoc configuration
+            options.encoding = "UTF-8"
+            classpath += project.files(android.getBootClasspath().join(File.pathSeparator))
+        }
+
+        task androidJavadocsJar(type: Jar, dependsOn: androidJavadocs) {
+//            classifier = 'javadoc'
+            archiveClassifier.set('javadoc')
+            from androidJavadocs.destinationDir
+        }
+
+        task androidSourcesJar(type: Jar) {
+//            classifier = 'sources'
+            archiveClassifier.set('sources')
+            from android.sourceSets.main.java.source
+        }
+
+        task androidLibraryJar(type: Jar/*, dependsOn: bundleReleaseAar */) {
+            from compileReleaseJavaWithJavac.destinationDir
+            exclude '**/R.class'
+            exclude '**/BuildConfig.class'
+            exclude '**/R$*.class'
+            baseName "${project.name}"
+        }
+    } else {
+        install {
+            repositories.mavenInstaller {
+                pom.groupId = GROUP
+                pom.artifactId = POM_ARTIFACT_ID
+                pom.packaging = POM_PACKAGING
+                pom.version = VERSION_NAME
+
+                configurePom(pom)
+            }
+        }
+
+        task sourcesJar(type: Jar, dependsOn: classes) {
+//            classifier = 'sources'
+            archiveClassifier.set('sources')
+            from sourceSets.main.allSource
+        }
+
+        task javadocJar(type: Jar, dependsOn: javadoc) {
+//            classifier = 'javadoc'
+            archiveClassifier.set('javadoc')
+            from javadoc.destinationDir
+        }
+    }
+
+    if (JavaVersion.current().isJava8Compatible()) {
+        allprojects {
+            tasks.withType(Javadoc) {
+                options.addStringOption('Xdoclint:none', '-quiet')
+            }
+        }
+    }
+
+    if (JavaVersion.current().isJava9Compatible()) {
+        allprojects {
+            tasks.withType(Javadoc) {
+                options.addBooleanOption('html5', true)
+            }
+        }
+    }
+
+    artifacts {
+        if (isAndroidProject) {
+//            archives androidLibraryJar
+            archives androidSourcesJar
+            // 一般都没有doc
+//            archives androidJavadocsJar
+        } else {
+            archives sourcesJar
+//            archives javadocJar
+        }
+    }
+    logger.info("Published artifacts in ${configurations.archives}:")
+    configurations.archives.artifacts.files.files.each { logger.info("\t$it") }
+}
